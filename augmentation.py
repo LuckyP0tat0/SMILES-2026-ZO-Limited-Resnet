@@ -1,61 +1,109 @@
 """
 augmentation.py — Data augmentation pipeline for CIFAR100 (student-modified).
 
-Students: Extend the *training* transform pipeline to improve generalization.
-The validation pipeline is fixed — do not modify it.
+ЗАЧЕМ АУГМЕНТАЦИЯ ПРИ ZO-ОБУЧЕНИИ?
+-------------------------------------
+Казалось бы, при всего 256 шагах аугментация важнее, чем при полном
+обучении — каждый батч должен быть максимально информативным. Разные
+аугментации одного изображения учат модель быть инвариантной к шумам,
+поворотам, цвету → лучшая генерализация на валидации.
 
-CIFAR100 images are 32×32. Both pipelines resize to 224×224 to match the
-input expected by the pretrained ResNet18 backbone.
+ВЫБРАННЫЕ ПРЕОБРАЗОВАНИЯ:
+  1. RandomCrop(224, padding=28): случайная обрезка с паддингом 28px.
+     Учит переводной инвариантности — объект может быть в любом месте.
+     padding=28 ≈ 12.5% от 224 — стандартное соотношение для CIFAR.
+
+  2. RandomHorizontalFlip(): зеркальное отражение по горизонтали.
+     Большинство объектов симметричны слева/справа. Стандарт для CIFAR.
+
+  3. ColorJitter: случайные изменения яркости, контраста, насыщенности.
+     Учит инвариантности к условиям освещения.
+     Параметры подобраны умеренными чтобы не исказить объекты.
+
+  4. RandomGrayscale(p=0.1): 10% вероятность перевода в оттенки серого.
+     Учит полагаться на форму, а не только на цвет.
+
+  5. RandomErasing(p=0.2): случайное стирание прямоугольника.
+     Симулирует окклюзию (частичное перекрытие объекта). Помогает
+     модели не переобучаться на конкретные паттерны пикселей.
+
+ВАЖНО: Валидационный pipeline НЕ ИЗМЕНЯЕТСЯ (только Resize + Normalize).
 """
 
 import torchvision.transforms as T
 
 # Per-channel mean and std computed on the CIFAR100 training set.
+# Используются для нормализации — это значения из оригинального датасета,
+# их НЕ НУЖНО менять.
 _CIFAR100_MEAN = (0.5071, 0.4867, 0.4408)
 _CIFAR100_STD = (0.2675, 0.2565, 0.2761)
 
 
 def get_transforms(train: bool) -> T.Compose:
-    """Return the image transform pipeline for CIFAR100.
+    """Возвращает pipeline преобразований для CIFAR100.
 
     Args:
-        train: If ``True``, returns the training pipeline (with data
-               augmentation). If ``False``, returns the validation pipeline
-               (deterministic; do not modify).
+        train: True — тренировочный pipeline (с аугментацией).
+               False — валидационный pipeline (детерминированный, не менять!).
 
     Returns:
-        A ``torchvision.transforms.Compose`` object ready to be passed to a
-        ``torchvision.datasets.CIFAR100`` dataset.
-
-    Student task (training pipeline only):
-        The skeleton includes resize, horizontal flip, and normalization.
-        Consider adding any of the following to improve generalization:
-          - ``T.RandomCrop(224, padding=28)``     — translation invariance
-          - ``T.ColorJitter(...)``                — colour robustness
-          - ``T.RandomRotation(degrees=15)``      — rotational invariance
-          - ``T.RandomErasing(p=0.2)``            — occlusion robustness
-          - ``T.AutoAugment(T.AutoAugmentPolicy.CIFAR10)`` — learned policy
-        Add transforms *before* ``T.ToTensor()`` (spatial/colour ops) or
-        *after* (tensor-level ops such as ``T.RandomErasing``).
+        torchvision.transforms.Compose объект для датасета CIFAR100.
     """
     if train:
         return T.Compose(
             [
-                # ----------------------------------------------------------
-                # STUDENT: Extend the training pipeline below.
-                # Keep the Resize and Normalize steps; add augmentations
-                # between or around them as appropriate.
-                # ----------------------------------------------------------
+                # Шаг 1: Resize до 224×224 (обязательно — ResNet18 ожидает 224×224)
+                # CIFAR100 изображения 32×32, увеличиваем до нужного размера
                 T.Resize(224),
+
+                # Шаг 2: RandomCrop с паддингом — переводная инвариантность.
+                # Сначала добавляем 28px нулей по краям (224+56=280),
+                # затем вырезаем случайный кроп 224×224.
+                # Эффект: объект смещается на случайное расстояние до 28px.
+                T.RandomCrop(224, padding=28),
+
+                # Шаг 3: Зеркальное отражение по горизонтали (50% вероятность).
+                # Удваивает эффективный размер датасета для симметричных объектов.
                 T.RandomHorizontalFlip(),
-                # Add more augmentations here ↓
+
+                # Шаг 4: ColorJitter — случайные изменения цвета.
+                # brightness=0.3: яркость от 70% до 130% оригинала
+                # contrast=0.3:   контраст от 70% до 130%
+                # saturation=0.3: насыщенность от 70% до 130%
+                # hue=0.1:        оттенок ±0.1 (небольшой сдвиг цвета)
+                T.ColorJitter(
+                    brightness=0.3,
+                    contrast=0.3,
+                    saturation=0.3,
+                    hue=0.1,
+                ),
+
+                # Шаг 5: 10% вероятность перевода в grayscale.
+                # Если изображение grayscale — то же самое значение по 3 каналам.
+                # Учит использовать форму/текстуру, а не только цвет.
+                T.RandomGrayscale(p=0.1),
+
+                # Шаг 6: Конвертируем PIL Image → torch.Tensor [0,1]
+                # Должен быть ДО Normalize и RandomErasing (tensor ops)
                 T.ToTensor(),
+
+                # Шаг 7: Нормализуем по mean/std CIFAR100.
+                # Переводит значения из [0,1] в нормализованное пространство,
+                # соответствующее тому, на чём обучался ImageNet backbone.
                 T.Normalize(mean=_CIFAR100_MEAN, std=_CIFAR100_STD),
-                # ----------------------------------------------------------
+
+                # Шаг 8: RandomErasing — стираем случайный прямоугольник.
+                # Применяется ПОСЛЕ ToTensor(), т.к. работает с тензорами.
+                # p=0.2: 20% вероятность стирания
+                # scale=(0.02, 0.2): площадь прямоугольника от 2% до 20%
+                # ratio=(0.3, 3.3): соотношение сторон прямоугольника
+                # value=0: заполняем нулями (=средним после нормализации ≈0)
+                T.RandomErasing(p=0.2, scale=(0.02, 0.2), ratio=(0.3, 3.3), value=0),
             ]
         )
     else:
-        # Fixed validation pipeline — do not modify.
+        # Фиксированный валидационный pipeline — НЕ ИЗМЕНЯТЬ.
+        # Только resize и нормализация, без случайности.
         return T.Compose(
             [
                 T.Resize(224),

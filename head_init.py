@@ -1,10 +1,27 @@
 """
 head_init.py — Final layer initialization (student-implemented).
 
-Students: Implement `init_last_layer` to control how the new classification
-head is initialized before fine-tuning begins. The skeleton below uses
-Kaiming uniform weights and zero bias — you are expected to experiment with
-alternatives (e.g. Xavier, orthogonal, small-scale random, learned bias init).
+ЗАЧЕМ ВАЖНА ИНИЦИАЛИЗАЦИЯ?
+----------------------------
+ZO-оптимизатор работает в очень ограниченном бюджете (256 шагов).
+Чем ближе начальные веса к хорошему решению, тем меньше шагов нужно.
+
+СТРАТЕГИЯ: Xavier uniform + маленький scale (×0.01)
+-----------------------------------------------------
+1. Xavier uniform: инициализирует веса так, чтобы дисперсия активаций
+   сохранялась между слоями. Это стандарт для классификаторов.
+
+2. Малый масштаб (×0.01): начинаем с очень маленьких весов.
+   - Начальные логиты ≈ 0 → loss ≈ ln(100) ≈ 4.6 (равномерное распределение)
+   - ZO-оптимизатор "видит" реальный градиентный сигнал с первого шага
+   - При больших весах loss очень высокая и шумная → оптимизатор тратит
+     первые шаги на "выход из плохой зоны"
+
+АЛЬТЕРНАТИВЫ (почему не выбрали):
+  - Kaiming uniform: разработан для ReLU-активаций внутри сети,
+    но fc — последний слой без нелинейности после него.
+  - Orthogonal: хорошо для RNN, избыточно для линейного слоя.
+  - Нулевые веса: все нейроны дают одинаковые градиенты → симметрия.
 """
 
 import torch
@@ -12,26 +29,27 @@ import torch.nn as nn
 
 
 def init_last_layer(layer: nn.Linear) -> None:
-    """Initialize the weights and bias of the final classification layer in-place.
+    """Инициализирует веса и смещения нового 100-классового слоя.
 
-    This function is called once during model construction (see model.py).
-    Modify it to experiment with different initialization strategies and observe
-    their effect on the "initialized head" evaluation checkpoint.
+    Вызывается один раз при создании модели (в model.py).
+    Влияет на результат Checkpoint 2 ("Initialized head, no FT").
 
     Args:
-        layer: The ``nn.Linear`` layer that serves as the new CIFAR100 head.
-               Modifies the layer in-place; return value is ignored.
-
-    Student task:
-        Replace or extend the skeleton below. Some strategies to consider:
-          - ``nn.init.xavier_uniform_``  — preserves variance across layers
-          - ``nn.init.orthogonal_``      — encourages diverse feature directions
-          - Small-scale init (e.g. scale weights by 0.01) — conservative start
-          - Non-zero bias init           — useful when class priors are known
+        layer: nn.Linear слой (in_features=512, out_features=100).
+               Модифицируется in-place; возвращаемое значение игнорируется.
     """
-    # -------------------------------------------------------------------------
-    # STUDENT: Replace or extend the initialization below.
-    # -------------------------------------------------------------------------
-    nn.init.kaiming_uniform_(layer.weight, nonlinearity="relu")
+    # Xavier uniform: равномерное распределение на [-a, +a], где
+    # a = gain × sqrt(6 / (fan_in + fan_out))
+    # Для gain=1.0 (линейный слой без нелинейности):
+    # a = sqrt(6 / (512 + 100)) ≈ 0.099
+    nn.init.xavier_uniform_(layer.weight, gain=1.0)
+
+    # Уменьшаем начальные веса в 100 раз:
+    # Это делает начальные логиты очень маленькими (~0),
+    # что соответствует почти равномерному распределению по классам.
+    # ZO-оптимизатор стартует из "тихой" зоны с малой loss ≈ ln(100).
+    layer.weight.data.mul_(0.01)
+
+    # Нулевое смещение: нет apriorных предпочтений по классам.
+    # (все 100 классов CIFAR100 равно представлены в данных)
     nn.init.zeros_(layer.bias)
-    # -------------------------------------------------------------------------
